@@ -1,4 +1,5 @@
 use crate::config::{Config, Protection, RouteConfig, ServiceConfig};
+use crate::deps;
 use crate::detect::DetectedService;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -43,7 +44,11 @@ impl ActiveShare {
     pub fn launch_url(&self) -> String {
         if self.access_mode == "token" {
             if let Some(token) = &self.share_token {
-                let separator = if self.public_url.contains('?') { '&' } else { '?' };
+                let separator = if self.public_url.contains('?') {
+                    '&'
+                } else {
+                    '?'
+                };
                 return format!("{}{}ltg_token={}", self.public_url, separator, token);
             }
         }
@@ -87,15 +92,13 @@ pub fn resolve_target(
     config: &Config,
     detected: &[DetectedService],
 ) -> Result<ShareTarget, String> {
-    let selector = selector
-        .map(|value| value.to_string())
-        .or_else(|| {
-            if config.default_share.target != "auto" {
-                Some(config.default_share.target.clone())
-            } else {
-                None
-            }
-        });
+    let selector = selector.map(|value| value.to_string()).or_else(|| {
+        if config.default_share.target != "auto" {
+            Some(config.default_share.target.clone())
+        } else {
+            None
+        }
+    });
 
     if let Some(selector) = selector {
         if let Ok(port) = selector.parse::<u16>() {
@@ -151,7 +154,9 @@ fn single_service_target_from_port(
 }
 
 fn single_service_target(service: &ServiceConfig, detected: &[DetectedService]) -> ShareTarget {
-    let detected_match = detected.iter().find(|candidate| candidate.port == service.port);
+    let detected_match = detected
+        .iter()
+        .find(|candidate| candidate.port == service.port);
     ShareTarget {
         label: service.name.clone(),
         description: format!("{} on port {}", service.role, service.port),
@@ -174,10 +179,16 @@ fn build_profile_target(
     let mut risky = false;
     let mut risk_reasons = Vec::new();
     for route in routes {
-        let service = config
-            .service_by_name(&route.service)
-            .ok_or_else(|| format!("route '{}' references missing service '{}'", route.path, route.service))?;
-        if let Some(detected_service) = detected.iter().find(|candidate| candidate.port == service.port) {
+        let service = config.service_by_name(&route.service).ok_or_else(|| {
+            format!(
+                "route '{}' references missing service '{}'",
+                route.path, route.service
+            )
+        })?;
+        if let Some(detected_service) = detected
+            .iter()
+            .find(|candidate| candidate.port == service.port)
+        {
             if detected_service.risky {
                 risky = true;
                 if let Some(reason) = &detected_service.risk_reason {
@@ -232,7 +243,9 @@ pub fn launch_share(
 ) -> Result<ActiveShare, String> {
     ensure_runtime_dirs(project_root)?;
     let share_id = format!("share-{}", unix_timestamp());
-    let exe = std::env::current_exe().map_err(|err| format!("failed to resolve current binary: {}", err))?;
+    let cloudflared_path = deps::ensure_cloudflared(true)?;
+    let exe = std::env::current_exe()
+        .map_err(|err| format!("failed to resolve current binary: {}", err))?;
     let expires_at = if protection.expires_in.is_empty() {
         None
     } else {
@@ -258,6 +271,8 @@ pub fn launch_share(
         .arg(&target.description)
         .arg("--routes")
         .arg(routes_spec)
+        .arg("--cloudflared-path")
+        .arg(cloudflared_path.display().to_string())
         .arg("--access-mode")
         .arg(&protection.access_mode);
 
@@ -280,7 +295,9 @@ pub fn launch_share(
         .map_err(|err| format!("failed to clone share log handle: {}", err))?;
     command.stdout(Stdio::from(share_log));
     command.stderr(Stdio::from(share_log_clone));
-    let child = command.spawn().map_err(|err| format!("failed to launch share worker: {}", err))?;
+    let child = command
+        .spawn()
+        .map_err(|err| format!("failed to launch share worker: {}", err))?;
 
     wait_for_state(project_root, &share_id, child.id(), &runner_log_path)
 }
@@ -300,7 +317,11 @@ pub fn wait_for_state(
         }
         if let Ok(log_contents) = fs::read_to_string(runner_log_path) {
             if log_contents.contains("error:") {
-                return Err(log_contents.lines().last().unwrap_or("share worker failed").to_string());
+                return Err(log_contents
+                    .lines()
+                    .last()
+                    .unwrap_or("share worker failed")
+                    .to_string());
             }
         }
         thread::sleep(Duration::from_millis(500));
@@ -315,9 +336,16 @@ pub fn wait_for_state(
 pub fn list_active_shares(project_root: &Path) -> Result<Vec<ActiveShare>, String> {
     ensure_runtime_dirs(project_root)?;
     let mut shares = Vec::new();
-    for entry in fs::read_dir(state_dir(project_root)).map_err(|err| format!("failed to read state dir: {}", err))? {
+    for entry in fs::read_dir(state_dir(project_root))
+        .map_err(|err| format!("failed to read state dir: {}", err))?
+    {
         let entry = entry.map_err(|err| format!("failed to read state entry: {}", err))?;
-        if entry.path().extension().and_then(|extension| extension.to_str()) != Some("state") {
+        if entry
+            .path()
+            .extension()
+            .and_then(|extension| extension.to_str())
+            != Some("state")
+        {
             continue;
         }
         if let Ok(mut share) = load_active_share_from_path(&entry.path()) {
@@ -358,7 +386,8 @@ pub fn run_share_worker(args: &[String]) -> Result<(), String> {
     ensure_runtime_dirs(&parsed.project_root)?;
     let proxy_port = bind_free_port()?;
     let state_path = state_dir(&parsed.project_root).join(format!("{}.state", parsed.share_id));
-    let access_log_path = logs_dir(&parsed.project_root).join(format!("{}.access.log", parsed.share_id));
+    let access_log_path =
+        logs_dir(&parsed.project_root).join(format!("{}.access.log", parsed.share_id));
     let route_map = parse_routes(&parsed.routes)?;
     let request_count = Arc::new(Mutex::new(0u64));
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -391,8 +420,10 @@ pub fn run_share_worker(args: &[String]) -> Result<(), String> {
         }
     });
 
-    let cloudflared_log_path = logs_dir(&parsed.project_root).join(format!("{}.cloudflared.log", parsed.share_id));
-    let (mut cloudflared, public_url) = start_cloudflared(proxy_port, &cloudflared_log_path)?;
+    let cloudflared_log_path =
+        logs_dir(&parsed.project_root).join(format!("{}.cloudflared.log", parsed.share_id));
+    let (mut cloudflared, public_url) =
+        start_cloudflared(proxy_port, &cloudflared_log_path, &parsed.cloudflared_path)?;
     let cloudflared_pid = cloudflared.id();
 
     let mut active = ActiveShare {
@@ -420,7 +451,10 @@ pub fn run_share_worker(args: &[String]) -> Result<(), String> {
                 break;
             }
         }
-        if let Some(status) = cloudflared.try_wait().map_err(|err| format!("failed to check cloudflared: {}", err))? {
+        if let Some(status) = cloudflared
+            .try_wait()
+            .map_err(|err| format!("failed to check cloudflared: {}", err))?
+        {
             active.status = format!("stopped({})", status);
             shutdown.store(true, Ordering::Relaxed);
             break;
@@ -505,7 +539,10 @@ fn handle_client(
     access_mode: &str,
     share_token: Option<&str>,
     expires_at: Option<u64>,
-) -> Result<(u16, String, String, Option<String>), (TcpStream, u16, String, String, String, Option<String>)> {
+) -> Result<
+    (u16, String, String, Option<String>),
+    (TcpStream, u16, String, String, String, Option<String>),
+> {
     let mut buffer = Vec::new();
     let mut temp = [0u8; 2048];
     let mut header_end = None;
@@ -687,7 +724,10 @@ fn handle_client(
                 502,
                 uri,
                 method,
-                format!("failed to connect to upstream {}: {}", upstream.upstream_port, err),
+                format!(
+                    "failed to connect to upstream {}: {}",
+                    upstream.upstream_port, err
+                ),
                 user_agent,
             ))
         }
@@ -695,7 +735,9 @@ fn handle_client(
 
     let _ = upstream_stream.set_read_timeout(Some(Duration::from_secs(30)));
     let _ = upstream_stream.set_write_timeout(Some(Duration::from_secs(30)));
-    if upstream_stream.write_all(forward_request.as_bytes()).is_err()
+    if upstream_stream
+        .write_all(forward_request.as_bytes())
+        .is_err()
         || upstream_stream.write_all(&body).is_err()
     {
         return Err((
@@ -747,7 +789,9 @@ fn handle_client(
                     ));
                 }
                 if chunked {
-                    if relay_chunked_body(&mut client, &mut upstream_stream, body_bytes.to_vec()).is_err() {
+                    if relay_chunked_body(&mut client, &mut upstream_stream, body_bytes.to_vec())
+                        .is_err()
+                    {
                         return Err((
                             client,
                             502,
@@ -760,8 +804,13 @@ fn handle_client(
                     return Ok((status_code, path_only.to_string(), method, user_agent));
                 }
                 if let Some(content_length) = content_length {
-                    if relay_sized_body(&mut client, &mut upstream_stream, body_bytes.to_vec(), content_length)
-                        .is_err()
+                    if relay_sized_body(
+                        &mut client,
+                        &mut upstream_stream,
+                        body_bytes.to_vec(),
+                        content_length,
+                    )
+                    .is_err()
                     {
                         return Err((
                             client,
@@ -826,7 +875,11 @@ fn write_error_response(mut stream: TcpStream, status_code: u16, message: &str) 
     stream.write_all(response.as_bytes())
 }
 
-fn start_cloudflared(proxy_port: u16, log_path: &Path) -> Result<(Child, String), String> {
+fn start_cloudflared(
+    proxy_port: u16,
+    log_path: &Path,
+    cloudflared_path: &Path,
+) -> Result<(Child, String), String> {
     let log_file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -835,7 +888,7 @@ fn start_cloudflared(proxy_port: u16, log_path: &Path) -> Result<(Child, String)
     let log_file_clone = log_file
         .try_clone()
         .map_err(|err| format!("failed to clone cloudflared log: {}", err))?;
-    let mut child = Command::new("cloudflared")
+    let mut child = Command::new(cloudflared_path)
         .args([
             "tunnel",
             "--no-autoupdate",
@@ -845,7 +898,7 @@ fn start_cloudflared(proxy_port: u16, log_path: &Path) -> Result<(Child, String)
         .stdout(Stdio::from(log_file))
         .stderr(Stdio::from(log_file_clone))
         .spawn()
-        .map_err(|err| format!("failed to start cloudflared: {}", err))?;
+        .map_err(|err| format!("failed to start {}: {}", cloudflared_path.display(), err))?;
 
     for _ in 0..60 {
         if let Ok(contents) = fs::read_to_string(log_path) {
@@ -853,7 +906,10 @@ fn start_cloudflared(proxy_port: u16, log_path: &Path) -> Result<(Child, String)
                 return Ok((child, url));
             }
         }
-        if let Some(status) = child.try_wait().map_err(|err| format!("failed to poll cloudflared: {}", err))? {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|err| format!("failed to poll cloudflared: {}", err))?
+        {
             return Err(format!(
                 "cloudflared exited before creating a tunnel: {}. Check {}",
                 status,
@@ -905,7 +961,8 @@ fn select_route<'a>(path: &str, routes: &'a [ShareRoute]) -> Option<&'a ShareRou
         let matches = if route.path == "/" {
             true
         } else {
-            path == route.path || path.starts_with(&format!("{}/", route.path.trim_end_matches('/')))
+            path == route.path
+                || path.starts_with(&format!("{}/", route.path.trim_end_matches('/')))
         };
         if !matches {
             continue;
@@ -1106,8 +1163,8 @@ fn bind_free_port() -> Result<u16, String> {
             return Ok(port);
         }
     }
-    let listener =
-        TcpListener::bind(("127.0.0.1", 0)).map_err(|err| format!("failed to reserve port: {}", err))?;
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .map_err(|err| format!("failed to reserve port: {}", err))?;
     let port = listener
         .local_addr()
         .map_err(|err| format!("failed to inspect reserved port: {}", err))?
@@ -1117,8 +1174,7 @@ fn bind_free_port() -> Result<u16, String> {
 }
 
 fn connect_loopback(port: u16) -> io::Result<TcpStream> {
-    TcpStream::connect(("127.0.0.1", port))
-        .or_else(|_| TcpStream::connect(("::1", port)))
+    TcpStream::connect(("127.0.0.1", port)).or_else(|_| TcpStream::connect(("::1", port)))
 }
 
 fn generate_token() -> String {
@@ -1155,7 +1211,10 @@ fn parse_duration_seconds(value: &str) -> Result<u64, String> {
 fn save_active_share(path: &Path, share: &ActiveShare) -> Result<(), String> {
     let mut data = String::new();
     data.push_str(&format!("id={}\n", share.id));
-    data.push_str(&format!("target_label={}\n", escape_state(&share.target_label)));
+    data.push_str(&format!(
+        "target_label={}\n",
+        escape_state(&share.target_label)
+    ));
     data.push_str(&format!(
         "target_description={}\n",
         escape_state(&share.target_description)
@@ -1169,12 +1228,16 @@ fn save_active_share(path: &Path, share: &ActiveShare) -> Result<(), String> {
     data.push_str(&format!("started_at={}\n", share.started_at));
     data.push_str(&format!(
         "expires_at={}\n",
-        share.expires_at.map(|value| value.to_string()).unwrap_or_default()
+        share
+            .expires_at
+            .map(|value| value.to_string())
+            .unwrap_or_default()
     ));
     data.push_str(&format!("pid={}\n", share.pid));
     data.push_str(&format!(
         "cloudflared_pid={}\n",
-        share.cloudflared_pid
+        share
+            .cloudflared_pid
             .map(|value| value.to_string())
             .unwrap_or_default()
     ));
@@ -1197,8 +1260,14 @@ fn load_active_share_from_path(path: &Path) -> Result<ActiveShare, String> {
         target_label: required(&map, "target_label")?,
         target_description: required(&map, "target_description")?,
         public_url: map.get("public_url").cloned().unwrap_or_default(),
-        access_mode: map.get("access_mode").cloned().unwrap_or_else(|| "token".to_string()),
-        share_token: map.get("share_token").filter(|value| !value.is_empty()).cloned(),
+        access_mode: map
+            .get("access_mode")
+            .cloned()
+            .unwrap_or_else(|| "token".to_string()),
+        share_token: map
+            .get("share_token")
+            .filter(|value| !value.is_empty())
+            .cloned(),
         started_at: map
             .get("started_at")
             .and_then(|value| value.parse::<u64>().ok())
@@ -1289,6 +1358,7 @@ struct InternalArgs {
     label: String,
     description: String,
     routes: String,
+    cloudflared_path: PathBuf,
     access_mode: String,
     share_token: Option<String>,
     expires_at: Option<u64>,
@@ -1312,12 +1382,17 @@ impl InternalArgs {
             map.insert(key, value);
             index += 2;
         }
+        let cloudflared_path = match map.get("cloudflared-path") {
+            Some(path) => PathBuf::from(path),
+            None => deps::ensure_cloudflared(false)?,
+        };
         Ok(Self {
             project_root: PathBuf::from(required(&map, "project-root")?),
             share_id: required(&map, "share-id")?,
             label: required(&map, "label")?,
             description: required(&map, "description")?,
             routes: required(&map, "routes")?,
+            cloudflared_path,
             access_mode: required(&map, "access-mode")?,
             share_token: map.get("share-token").cloned(),
             expires_at: map
@@ -1377,7 +1452,10 @@ mod tests {
             token_from_referer("https://example.com/app?foo=bar&ltg_token=secret&x=1").as_deref(),
             Some("secret")
         );
-        assert_eq!(token_from_referer("https://example.com/app").as_deref(), None);
+        assert_eq!(
+            token_from_referer("https://example.com/app").as_deref(),
+            None
+        );
     }
 
     #[test]

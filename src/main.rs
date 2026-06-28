@@ -1,10 +1,17 @@
 mod config;
+mod deps;
 mod detect;
 mod share;
 
-use config::{generate_default_routes, load_config, merge_detected_services, save_config, Config, Protection};
+use config::{
+    generate_default_routes, load_config, merge_detected_services, save_config, Config, Protection,
+};
+use deps::{command_path, ensure_cloudflared};
 use detect::{detect_services, print_services};
-use share::{effective_protection, launch_share, list_active_shares, resolve_target, run_share_worker, summarize_access, ShareOptions};
+use share::{
+    effective_protection, launch_share, list_active_shares, resolve_target, run_share_worker,
+    summarize_access, ShareOptions,
+};
 use std::env;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -26,7 +33,8 @@ fn run() -> Result<(), String> {
         }
     }
 
-    let project_root = env::current_dir().map_err(|err| format!("failed to resolve current dir: {}", err))?;
+    let project_root =
+        env::current_dir().map_err(|err| format!("failed to resolve current dir: {}", err))?;
     let command = args.first().map(|value| value.as_str()).unwrap_or("help");
     match command {
         "run" => cmd_run(&project_root),
@@ -34,11 +42,15 @@ fn run() -> Result<(), String> {
         "routes" => cmd_routes(&project_root, &args[1..]),
         "protect" => cmd_protect(&project_root, &args[1..]),
         "status" => cmd_status(&project_root),
+        "doctor" => cmd_doctor(),
         "help" | "--help" | "-h" => {
             print_help();
             Ok(())
         }
-        unknown => Err(format!("unknown command '{}'. Run `ltg help` for usage.", unknown)),
+        unknown => Err(format!(
+            "unknown command '{}'. Run `ltg help` for usage.",
+            unknown
+        )),
     }
 }
 
@@ -47,7 +59,10 @@ fn cmd_run(project_root: &PathBuf) -> Result<(), String> {
     print_services(&detected);
 
     let mut config = load_or_default_config(project_root)?;
-    let detected_config = detected.iter().map(|service| service.to_config()).collect::<Vec<_>>();
+    let detected_config = detected
+        .iter()
+        .map(|service| service.to_config())
+        .collect::<Vec<_>>();
     merge_detected_services(&mut config, &detected_config);
     if config.routes.is_empty() {
         generate_default_routes(&mut config);
@@ -70,7 +85,9 @@ fn cmd_run(project_root: &PathBuf) -> Result<(), String> {
         }
     } else {
         println!();
-        println!("No shareable HTTP services detected. Start your local app, then re-run `ltg run`.");
+        println!(
+            "No shareable HTTP services detected. Start your local app, then re-run `ltg run`."
+        );
     }
     println!(
         "Project config synced to {}",
@@ -82,7 +99,10 @@ fn cmd_run(project_root: &PathBuf) -> Result<(), String> {
 fn cmd_share(project_root: &PathBuf, args: &[String]) -> Result<(), String> {
     let detected = detect_services(project_root)?;
     let mut config = load_or_default_config(project_root)?;
-    let detected_config = detected.iter().map(|service| service.to_config()).collect::<Vec<_>>();
+    let detected_config = detected
+        .iter()
+        .map(|service| service.to_config())
+        .collect::<Vec<_>>();
     merge_detected_services(&mut config, &detected_config);
     if config.routes.is_empty() {
         generate_default_routes(&mut config);
@@ -120,19 +140,27 @@ fn cmd_share(project_root: &PathBuf, args: &[String]) -> Result<(), String> {
     let protection = effective_protection(&config, &options);
     let active = launch_share(project_root, &target, &protection)?;
     println!("Share ready: {}", active.launch_url());
-    println!("Target: {} ({})", active.target_label, active.target_description);
+    println!(
+        "Target: {} ({})",
+        active.target_label, active.target_description
+    );
     println!("Access mode: {}", active.access_mode);
     if let Some(token) = &active.share_token {
         println!("Share token: {}", token);
         println!("Raw URL: {}", active.public_url);
-        println!("Tip: send header `X-LTG-Token: {}` if you cannot use query params.", token);
+        println!(
+            "Tip: send header `X-LTG-Token: {}` if you cannot use query params.",
+            token
+        );
     }
     if let Some(expires_at) = active.expires_at {
         println!("Expires at: {}", expires_at);
     }
     println!("Share id: {}", active.id);
     if !options.detach {
-        println!("Tunnel is running in the foreground. Keep this command open; press Ctrl+C to stop.");
+        println!(
+            "Tunnel is running in the foreground. Keep this command open; press Ctrl+C to stop."
+        );
         loop {
             if active
                 .expires_at
@@ -151,14 +179,20 @@ fn cmd_share(project_root: &PathBuf, args: &[String]) -> Result<(), String> {
 fn cmd_routes(project_root: &PathBuf, args: &[String]) -> Result<(), String> {
     let detected = detect_services(project_root)?;
     let mut config = load_or_default_config(project_root)?;
-    let detected_config = detected.iter().map(|service| service.to_config()).collect::<Vec<_>>();
+    let detected_config = detected
+        .iter()
+        .map(|service| service.to_config())
+        .collect::<Vec<_>>();
     merge_detected_services(&mut config, &detected_config);
     let action = args.first().map(|value| value.as_str()).unwrap_or("show");
     match action {
         "init" => {
             generate_default_routes(&mut config);
             save_config(project_root, &config)?;
-            println!("Route profiles written to {}", config::config_path(project_root).display());
+            println!(
+                "Route profiles written to {}",
+                config::config_path(project_root).display()
+            );
         }
         "show" => {
             if config.routes.is_empty() {
@@ -173,7 +207,12 @@ fn cmd_routes(project_root: &PathBuf, args: &[String]) -> Result<(), String> {
                 }
             }
         }
-        other => return Err(format!("unsupported routes action '{}'. Use `show` or `init`.", other)),
+        other => {
+            return Err(format!(
+                "unsupported routes action '{}'. Use `show` or `init`.",
+                other
+            ))
+        }
     }
     Ok(())
 }
@@ -189,11 +228,13 @@ fn cmd_protect(project_root: &PathBuf, args: &[String]) -> Result<(), String> {
                 index += 2;
             }
             "--access-mode" => {
-                protection.access_mode = required_arg(args, index + 1, "--access-mode")?.to_string();
+                protection.access_mode =
+                    required_arg(args, index + 1, "--access-mode")?.to_string();
                 index += 2;
             }
             "--share-token" => {
-                protection.share_token = required_arg(args, index + 1, "--share-token")?.to_string();
+                protection.share_token =
+                    required_arg(args, index + 1, "--share-token")?.to_string();
                 index += 2;
             }
             "--warn-sensitive" => {
@@ -229,7 +270,12 @@ fn cmd_status(project_root: &PathBuf) -> Result<(), String> {
         let (hits, visitors) = summarize_access(project_root, &share.id)?;
         println!(
             "{:<18} {:<14} {:<10} {:<8} {:<8} {}",
-            share.id, share.target_label, share.status, share.access_mode, hits, share.launch_url()
+            share.id,
+            share.target_label,
+            share.status,
+            share.access_mode,
+            hits,
+            share.launch_url()
         );
         if let Some(expires_at) = share.expires_at {
             println!("  expires_at={}", expires_at);
@@ -240,9 +286,63 @@ fn cmd_status(project_root: &PathBuf) -> Result<(), String> {
         if !visitors.is_empty() {
             println!("  visitors={}", visitors.join(", "));
         }
-        println!("  proxy_port={} pid={} cloudflared_pid={:?}", share.proxy_port, share.pid, share.cloudflared_pid);
+        println!(
+            "  proxy_port={} pid={} cloudflared_pid={:?}",
+            share.proxy_port, share.pid, share.cloudflared_pid
+        );
     }
     Ok(())
+}
+
+fn cmd_doctor() -> Result<(), String> {
+    let mut ok = true;
+    println!("LocalToGlobal doctor");
+
+    match env::current_exe() {
+        Ok(path) => print_check("ltg", true, Some(path.display().to_string())),
+        Err(err) => {
+            ok = false;
+            print_check(
+                "ltg",
+                false,
+                Some(format!("failed to resolve current exe: {}", err)),
+            );
+        }
+    }
+
+    match ensure_cloudflared(true) {
+        Ok(path) => print_check("cloudflared", true, Some(path.display().to_string())),
+        Err(err) => {
+            ok = false;
+            print_check("cloudflared", false, Some(err));
+        }
+    }
+
+    for required in ["lsof", "ps"] {
+        match command_path(required) {
+            Some(path) => print_check(required, true, Some(path.display().to_string())),
+            None => {
+                ok = false;
+                print_check(required, false, Some("not found on PATH".to_string()));
+            }
+        }
+    }
+
+    match command_path("curl") {
+        Some(path) => print_check("curl", true, Some(path.display().to_string())),
+        None => print_check(
+            "curl",
+            false,
+            Some("not found; needed only if cloudflared must be auto-installed".to_string()),
+        ),
+    }
+
+    if ok {
+        println!("Ready to share local apps.");
+        Ok(())
+    } else {
+        Err("doctor found missing requirements".to_string())
+    }
 }
 
 fn load_or_default_config(project_root: &PathBuf) -> Result<Config, String> {
@@ -284,7 +384,9 @@ fn parse_share_options(args: &[String]) -> Result<ShareOptions, String> {
                 detach = true;
                 index += 1;
             }
-            value if value.starts_with("--") => return Err(format!("unsupported share flag '{}'", value)),
+            value if value.starts_with("--") => {
+                return Err(format!("unsupported share flag '{}'", value))
+            }
             value => {
                 if selector.is_none() {
                     selector = Some(value.to_string());
@@ -354,15 +456,27 @@ fn print_protection(protection: &Protection) {
     );
 }
 
+fn print_check(name: &str, ok: bool, detail: Option<String>) {
+    let status = if ok { "ok" } else { "missing" };
+    if let Some(detail) = detail {
+        println!("{:<14} {:<8} {}", name, status, detail);
+    } else {
+        println!("{:<14} {}", name, status);
+    }
+}
+
 fn print_help() {
     println!("LocalToGlobal (ltg)");
     println!();
     println!("Commands:");
-    println!("  run                 Detect local services, recommend what to share, and sync config");
+    println!(
+        "  run                 Detect local services, recommend what to share, and sync config"
+    );
     println!("  share [target]      Share a detected service, port, or route profile");
     println!("  routes [show|init]  Inspect or scaffold route profiles");
     println!("  protect [flags]     Update protection defaults in .localtoglobal.yml");
     println!("  status              Show active shares, health, and access summary");
+    println!("  doctor              Check/install runtime dependencies");
     println!();
     println!("Share flags:");
     println!("  --expires-in <1h|30m|120>");
