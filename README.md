@@ -18,6 +18,12 @@ If `ltg` is not found after install, add this to your shell profile:
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
+You can also run the installed binary directly:
+
+```bash
+$HOME/.local/bin/ltg share 3000
+```
+
 ## Quick Start
 
 Start your local app, then share it:

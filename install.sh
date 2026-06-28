@@ -61,12 +61,20 @@ chmod 755 "$install_dir/ltg"
 
 echo "Installed ltg to $install_dir/ltg"
 
+path_ready=1
 case ":$PATH:" in
   *":$install_dir:"*) ;;
   *)
+    path_ready=0
     echo
-    echo "Add this to your shell profile if ltg is not found:"
+    echo "ltg is installed, but $install_dir is not on PATH in this terminal."
+    echo "Use it immediately with:"
+    echo "  $install_dir/ltg share 3000"
+    echo
+    echo "To make 'ltg' work as a command, run this once:"
     echo "  export PATH=\"$install_dir:\$PATH\""
+    echo
+    echo "Add that line to your shell profile to make it permanent."
     ;;
 esac
 
@@ -74,7 +82,11 @@ echo
 echo "Checking runtime dependencies..."
 if "$install_dir/ltg" doctor; then
   echo
-  echo "Ready. Try: ltg share 3000"
+  if [ "$path_ready" -eq 1 ]; then
+    echo "Ready. Try: ltg share 3000"
+  else
+    echo "Ready. Try: $install_dir/ltg share 3000"
+  fi
 else
   echo
   echo "ltg installed, but doctor found something to fix before sharing."
