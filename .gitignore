@@ -1,0 +1,6 @@
+target/
+.DS_Store
+
+# LocalToGlobal runtime state/logs can include public tunnel URLs and share tokens.
+.localtoglobal/
+.localtoglobal.yml
