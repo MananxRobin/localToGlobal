@@ -40,6 +40,13 @@ pub struct ActiveShare {
     pub proxy_port: u16,
 }
 
+#[derive(Debug, Clone)]
+pub struct StoppedShare {
+    pub share: ActiveShare,
+    pub stopped_worker: bool,
+    pub stopped_cloudflared: bool,
+}
+
 impl ActiveShare {
     pub fn launch_url(&self) -> String {
         if self.access_mode == "token" {
@@ -350,11 +357,82 @@ pub fn list_active_shares(project_root: &Path) -> Result<Vec<ActiveShare>, Strin
         }
         if let Ok(mut share) = load_active_share_from_path(&entry.path()) {
             refresh_share_status(&mut share);
+            let _ = save_active_share(&entry.path(), &share);
             shares.push(share);
         }
     }
     shares.sort_by(|left, right| right.started_at.cmp(&left.started_at));
     Ok(shares)
+}
+
+pub fn stop_shares(
+    project_root: &Path,
+    selector: Option<&str>,
+    stop_all: bool,
+) -> Result<Vec<StoppedShare>, String> {
+    ensure_runtime_dirs(project_root)?;
+    let mut shares = Vec::new();
+    for entry in fs::read_dir(state_dir(project_root))
+        .map_err(|err| format!("failed to read state dir: {}", err))?
+    {
+        let entry = entry.map_err(|err| format!("failed to read state entry: {}", err))?;
+        if entry
+            .path()
+            .extension()
+            .and_then(|extension| extension.to_str())
+            != Some("state")
+        {
+            continue;
+        }
+        if let Ok(mut share) = load_active_share_from_path(&entry.path()) {
+            refresh_share_status(&mut share);
+            shares.push((entry.path(), share));
+        }
+    }
+    shares.sort_by(|left, right| right.1.started_at.cmp(&left.1.started_at));
+
+    let selected = if stop_all {
+        shares
+            .into_iter()
+            .filter(|(_, share)| share_has_live_process(share))
+            .collect::<Vec<_>>()
+    } else if let Some(selector) = selector {
+        let matched = shares
+            .into_iter()
+            .filter(|(_, share)| share.id == selector)
+            .collect::<Vec<_>>();
+        if matched.is_empty() {
+            return Err(format!("could not find share '{}'", selector));
+        }
+        matched
+    } else {
+        shares
+            .into_iter()
+            .find(|(_, share)| share_has_live_process(share))
+            .map(|share| vec![share])
+            .unwrap_or_default()
+    };
+
+    let mut stopped = Vec::new();
+    for (path, mut share) in selected {
+        let stopped_cloudflared = match share.cloudflared_pid {
+            Some(pid) => terminate_pid(pid)?,
+            None => false,
+        };
+        let stopped_worker = terminate_pid(share.pid)?;
+        refresh_share_status(&mut share);
+        if !share_has_live_process(&share) {
+            share.status = "stopped".to_string();
+        }
+        save_active_share(&path, &share)?;
+        stopped.push(StoppedShare {
+            share,
+            stopped_worker,
+            stopped_cloudflared,
+        });
+    }
+
+    Ok(stopped)
 }
 
 fn refresh_share_status(share: &mut ActiveShare) {
@@ -379,6 +457,44 @@ fn refresh_share_status(share: &mut ActiveShare) {
             }
         }
     }
+}
+
+fn share_has_live_process(share: &ActiveShare) -> bool {
+    let worker_alive = process_alive(share.pid).unwrap_or(false);
+    let cloudflared_alive = share
+        .cloudflared_pid
+        .and_then(process_alive)
+        .unwrap_or(false);
+    worker_alive || cloudflared_alive
+}
+
+fn terminate_pid(pid: u32) -> Result<bool, String> {
+    if pid == 0 || !process_alive(pid).unwrap_or(false) {
+        return Ok(false);
+    }
+    let status = Command::new("kill")
+        .arg("-TERM")
+        .arg(pid.to_string())
+        .status()
+        .map_err(|err| format!("failed to run kill for pid {}: {}", pid, err))?;
+    if !status.success() {
+        return Err(format!("failed to terminate pid {}", pid));
+    }
+    for _ in 0..10 {
+        if !process_alive(pid).unwrap_or(false) {
+            return Ok(true);
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    let status = Command::new("kill")
+        .arg("-KILL")
+        .arg(pid.to_string())
+        .status()
+        .map_err(|err| format!("failed to force-kill pid {}: {}", pid, err))?;
+    if !status.success() {
+        return Err(format!("failed to force-kill pid {}", pid));
+    }
+    Ok(true)
 }
 
 pub fn run_share_worker(args: &[String]) -> Result<(), String> {

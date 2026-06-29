@@ -53,6 +53,9 @@ ltg share
 ltg routes init
 ltg protect --expires-in 30m --access-mode token
 ltg status
+ltg stop
+ltg stop --all
+ltg update
 ltg doctor
 ```
 
@@ -64,6 +67,8 @@ The CLI keeps a project-aware config in `.localtoglobal.yml` and runtime state u
 
 - `share` starts a small local guard proxy that enforces expiry and optional share tokens before forwarding to your real local app.
 - `status` summarizes active shares by reading the persisted runtime state and access logs.
+- `stop` shuts down the latest active share, a selected share id, or all active shares with `--all`.
+- `update` replaces the current `ltg` binary with the latest GitHub Release for your OS and CPU.
 - Route profiles let you publish multiple local services behind one Cloudflare URL by matching path prefixes.
 
 ## Develop From Source

@@ -6,11 +6,11 @@ mod share;
 use config::{
     generate_default_routes, load_config, merge_detected_services, save_config, Config, Protection,
 };
-use deps::{command_path, ensure_cloudflared};
+use deps::{command_path, ensure_cloudflared, update_ltg};
 use detect::{detect_services, print_services};
 use share::{
     effective_protection, launch_share, list_active_shares, resolve_target, run_share_worker,
-    summarize_access, ShareOptions,
+    stop_shares, summarize_access, ShareOptions,
 };
 use std::env;
 use std::io::{self, Write};
@@ -42,6 +42,8 @@ fn run() -> Result<(), String> {
         "routes" => cmd_routes(&project_root, &args[1..]),
         "protect" => cmd_protect(&project_root, &args[1..]),
         "status" => cmd_status(&project_root),
+        "stop" => cmd_stop(&project_root, &args[1..]),
+        "update" => cmd_update(&args[1..]),
         "doctor" => cmd_doctor(),
         "help" | "--help" | "-h" => {
             print_help();
@@ -161,6 +163,7 @@ fn cmd_share(project_root: &PathBuf, args: &[String]) -> Result<(), String> {
         println!(
             "Tunnel is running in the foreground. Keep this command open; press Ctrl+C to stop."
         );
+        println!("If it keeps running, use `ltg stop {}`.", active.id);
         loop {
             if active
                 .expires_at
@@ -294,6 +297,54 @@ fn cmd_status(project_root: &PathBuf) -> Result<(), String> {
     Ok(())
 }
 
+fn cmd_stop(project_root: &PathBuf, args: &[String]) -> Result<(), String> {
+    let mut selector = None;
+    let mut stop_all = false;
+    for arg in args {
+        match arg.as_str() {
+            "--all" => stop_all = true,
+            value if value.starts_with("--") => {
+                return Err(format!("unsupported stop flag '{}'", value));
+            }
+            value => {
+                if selector.is_some() {
+                    return Err(format!("unexpected extra stop argument '{}'", value));
+                }
+                selector = Some(value.to_string());
+            }
+        }
+    }
+    if stop_all && selector.is_some() {
+        return Err("use either `ltg stop --all` or `ltg stop <share-id>`".to_string());
+    }
+
+    let stopped = stop_shares(project_root, selector.as_deref(), stop_all)?;
+    if stopped.is_empty() {
+        println!("No active shares to stop.");
+        return Ok(());
+    }
+
+    for result in stopped {
+        println!(
+            "Stopped {} ({})",
+            result.share.id, result.share.target_label
+        );
+        if result.stopped_cloudflared {
+            println!("  cloudflared pid stopped");
+        }
+        if result.stopped_worker {
+            println!("  share worker pid stopped");
+        }
+        if !result.stopped_cloudflared && !result.stopped_worker {
+            println!(
+                "  no live process was found; state marked {}",
+                result.share.status
+            );
+        }
+    }
+    Ok(())
+}
+
 fn cmd_doctor() -> Result<(), String> {
     let mut ok = true;
     println!("LocalToGlobal doctor");
@@ -343,6 +394,42 @@ fn cmd_doctor() -> Result<(), String> {
     } else {
         Err("doctor found missing requirements".to_string())
     }
+}
+
+fn cmd_update(args: &[String]) -> Result<(), String> {
+    let mut version = None;
+    let mut index = 0usize;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--version" => {
+                version = Some(required_arg(args, index + 1, "--version")?.to_string());
+                index += 2;
+            }
+            value if value.starts_with("--") => {
+                return Err(format!("unsupported update flag '{}'", value));
+            }
+            value => {
+                if version.is_none() {
+                    version = Some(value.to_string());
+                    index += 1;
+                } else {
+                    return Err(format!("unexpected extra update argument '{}'", value));
+                }
+            }
+        }
+    }
+
+    println!("Current version: {}", env!("CARGO_PKG_VERSION"));
+    println!(
+        "Updating ltg from {}...",
+        version.as_deref().unwrap_or("latest release")
+    );
+    let result = update_ltg(version.as_deref())?;
+    println!("Installed {}", result.asset_name);
+    println!("Source: {}", result.source_url);
+    println!("Path: {}", result.installed_path.display());
+    println!("Run `ltg doctor` to verify the updated binary.");
+    Ok(())
 }
 
 fn load_or_default_config(project_root: &PathBuf) -> Result<Config, String> {
@@ -476,6 +563,8 @@ fn print_help() {
     println!("  routes [show|init]  Inspect or scaffold route profiles");
     println!("  protect [flags]     Update protection defaults in .localtoglobal.yml");
     println!("  status              Show active shares, health, and access summary");
+    println!("  stop [id|--all]     Stop the latest, selected, or all active shares");
+    println!("  update [--version]  Update this ltg binary from GitHub releases");
     println!("  doctor              Check/install runtime dependencies");
     println!();
     println!("Share flags:");

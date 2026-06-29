@@ -11,6 +11,13 @@ struct DownloadAsset {
     archive: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct UpdateResult {
+    pub installed_path: PathBuf,
+    pub asset_name: String,
+    pub source_url: String,
+}
+
 pub fn ensure_cloudflared(verbose: bool) -> Result<PathBuf, String> {
     if let Some(path) = env::var_os("LTG_CLOUDFLARED_PATH") {
         let path = PathBuf::from(path);
@@ -82,12 +89,131 @@ fn managed_cloudflared_path() -> Result<PathBuf, String> {
     Ok(managed_bin_dir()?.join(binary_name("cloudflared")))
 }
 
+pub fn update_ltg(version: Option<&str>) -> Result<UpdateResult, String> {
+    let current_exe =
+        env::current_exe().map_err(|err| format!("failed to resolve current ltg path: {}", err))?;
+    let asset = ltg_asset(version)?;
+    let parent = current_exe
+        .parent()
+        .ok_or_else(|| format!("invalid ltg path {}", current_exe.display()))?;
+    fs::create_dir_all(parent)
+        .map_err(|err| format!("failed to create {}: {}", parent.display(), err))?;
+
+    if command_path("curl").is_none() {
+        return Err("curl is required to update ltg".to_string());
+    }
+    if command_path("tar").is_none() {
+        return Err("tar is required to unpack ltg updates".to_string());
+    }
+
+    let work_dir = parent.join(format!(".ltg-update-{}", unix_timestamp()));
+    fs::create_dir_all(&work_dir)
+        .map_err(|err| format!("failed to create {}: {}", work_dir.display(), err))?;
+    let download_path = work_dir.join(asset.name);
+    let status = Command::new("curl")
+        .arg("-fL")
+        .arg("--retry")
+        .arg("3")
+        .arg("--connect-timeout")
+        .arg("20")
+        .arg("-o")
+        .arg(&download_path)
+        .arg(&asset.url)
+        .status()
+        .map_err(|err| format!("failed to run curl: {}", err))?;
+    if !status.success() {
+        let _ = fs::remove_dir_all(&work_dir);
+        return Err(format!("failed to download {}", asset.url));
+    }
+
+    let extract_dir = work_dir.join("extract");
+    fs::create_dir_all(&extract_dir)
+        .map_err(|err| format!("failed to create {}: {}", extract_dir.display(), err))?;
+    let status = Command::new("tar")
+        .arg("-xzf")
+        .arg(&download_path)
+        .arg("-C")
+        .arg(&extract_dir)
+        .status()
+        .map_err(|err| format!("failed to run tar: {}", err))?;
+    if !status.success() {
+        let _ = fs::remove_dir_all(&work_dir);
+        return Err(format!("failed to unpack {}", download_path.display()));
+    }
+
+    let unpacked = find_file_named(&extract_dir, "ltg")
+        .ok_or_else(|| "ltg release archive did not contain an ltg binary".to_string())?;
+    let replacement = parent.join(format!(".ltg-replacement-{}", unix_timestamp()));
+    fs::copy(&unpacked, &replacement).map_err(|err| {
+        format!(
+            "failed to prepare replacement binary {}: {}",
+            replacement.display(),
+            err
+        )
+    })?;
+    mark_executable(&replacement)?;
+    fs::rename(&replacement, &current_exe).map_err(|err| {
+        let _ = fs::remove_file(&replacement);
+        format!(
+            "failed to replace {}. Try running the installer again: {}",
+            current_exe.display(),
+            err
+        )
+    })?;
+    let _ = fs::remove_dir_all(&work_dir);
+
+    Ok(UpdateResult {
+        installed_path: current_exe,
+        asset_name: asset.name.to_string(),
+        source_url: asset.url,
+    })
+}
+
 fn binary_name(command: &str) -> String {
     if cfg!(windows) {
         format!("{}.exe", command)
     } else {
         command.to_string()
     }
+}
+
+fn ltg_asset(version: Option<&str>) -> Result<DownloadAsset, String> {
+    ltg_asset_for(env::consts::OS, env::consts::ARCH, version).ok_or_else(|| {
+        format!(
+            "automatic ltg updates are not supported on {} {}; reinstall from GitHub releases manually",
+            env::consts::OS,
+            env::consts::ARCH
+        )
+    })
+}
+
+fn ltg_asset_for(os: &str, arch: &str, version: Option<&str>) -> Option<DownloadAsset> {
+    let name = match (os, arch) {
+        ("macos", "x86_64") => "ltg-darwin-amd64.tar.gz",
+        ("macos", "aarch64") => "ltg-darwin-arm64.tar.gz",
+        ("linux", "x86_64") => "ltg-linux-amd64.tar.gz",
+        ("linux", "aarch64") => "ltg-linux-arm64.tar.gz",
+        _ => return None,
+    };
+    let owner = env::var("LTG_OWNER").unwrap_or_else(|_| "MananxRobin".to_string());
+    let repo = env::var("LTG_REPO").unwrap_or_else(|_| "localToGlobal".to_string());
+    let release_ref = version.unwrap_or("latest");
+    let url = if release_ref == "latest" {
+        format!(
+            "https://github.com/{}/{}/releases/latest/download/{}",
+            owner, repo, name
+        )
+    } else {
+        format!(
+            "https://github.com/{}/{}/releases/download/{}/{}",
+            owner, repo, release_ref, name
+        )
+    };
+    Some(DownloadAsset {
+        name,
+        url,
+        archive: true,
+    })
 }
 
 fn cloudflared_asset() -> Result<DownloadAsset, String> {
@@ -280,5 +406,29 @@ mod tests {
             cloudflared_asset_for("linux", "x86_64").unwrap().name,
             "cloudflared-linux-amd64"
         );
+    }
+
+    #[test]
+    fn maps_supported_ltg_release_assets() {
+        assert_eq!(
+            ltg_asset_for("macos", "aarch64", None).unwrap().name,
+            "ltg-darwin-arm64.tar.gz"
+        );
+        assert_eq!(
+            ltg_asset_for("macos", "x86_64", None).unwrap().name,
+            "ltg-darwin-amd64.tar.gz"
+        );
+        assert_eq!(
+            ltg_asset_for("linux", "aarch64", None).unwrap().name,
+            "ltg-linux-arm64.tar.gz"
+        );
+        assert_eq!(
+            ltg_asset_for("linux", "x86_64", None).unwrap().name,
+            "ltg-linux-amd64.tar.gz"
+        );
+        assert!(ltg_asset_for("linux", "x86_64", Some("v1.2.3"))
+            .unwrap()
+            .url
+            .contains("/releases/download/v1.2.3/"));
     }
 }
