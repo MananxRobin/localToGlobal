@@ -49,15 +49,17 @@ fi
 
 tmp="${TMPDIR:-/tmp}/ltg-install.$$"
 mkdir -p "$tmp"
-trap 'rm -rf "$tmp"' EXIT INT TERM
+trap 'rm -rf "$tmp"; [ -n "${install_tmp:-}" ] && rm -f "$install_tmp"' EXIT INT TERM
 
 echo "Downloading $url"
 curl -fsSL "$url" -o "$tmp/$asset"
 tar -xzf "$tmp/$asset" -C "$tmp"
 
 mkdir -p "$install_dir"
-cp "$tmp/ltg" "$install_dir/ltg"
-chmod 755 "$install_dir/ltg"
+install_tmp="$install_dir/.ltg-install.$$"
+cp "$tmp/ltg" "$install_tmp"
+chmod 755 "$install_tmp"
+mv -f "$install_tmp" "$install_dir/ltg"
 
 echo "Installed ltg to $install_dir/ltg"
 
